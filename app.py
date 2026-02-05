@@ -1,7 +1,6 @@
 import streamlit as st
 import pandas as pd
 import folium
-# CAMBIO CLAVE: Importamos folium_static para evitar el parpadeo
 from streamlit_folium import folium_static
 import polyline
 import requests
@@ -49,7 +48,6 @@ with st.sidebar:
 # --- LÓGICA PRINCIPAL ---
 if boton_buscar:
     with st.spinner('Conectando con satélites y calculando ruta...'):
-        # Usamos ArcGIS por estabilidad
         geolocator = ArcGIS(timeout=10)
         
         try:
@@ -70,7 +68,7 @@ if boton_buscar:
                 try:
                     r = requests.get(url, headers=headers).json()
                 except:
-                     r = {} # Manejo de error si OSRM falla
+                     r = {} 
                 
                 if 'routes' not in r:
                     st.session_state.tipo_mensaje = "error"
@@ -108,22 +106,25 @@ if boton_buscar:
                         if cerca:
                             count += 1
                             
-                            params = {
-                                'origin': origen,
-                                'destination': destino,
-                                'waypoints': f"{fila[c_lat]},{fila[c_lon]}",
-                                'travelmode': 'driving'
-                            }
-                            link_gmaps = f"https://www.google.com/maps/dir/?api=1?{urllib.parse.urlencode(params)}"
+                            # --- NUEVO ENLACE OFICIAL DE GOOGLE MAPS ---
+                            # Usamos la estructura oficial: dir/?api=1
+                            # Esto garantiza que abra la App en modo navegación
+                            base_url = "https://www.google.com/maps/dir/?api=1"
+                            origen_enc = urllib.parse.quote(origen)
+                            destino_enc = urllib.parse.quote(destino)
+                            # Google Maps requiere coordenadas sin espacios
+                            waypoint = f"{fila[c_lat]},{fila[c_lon]}" 
+                            
+                            link_gmaps = f"{base_url}&origin={origen_enc}&destination={destino_enc}&waypoints={waypoint}&travelmode=driving"
 
                             html_popup = f"""
                             <div style='font-family:sans-serif; width:200px;'>
                                 <b style='color:#2E7D32'>{fila[c_nom]}</b><br>
                                 <span style='font-size:12px'>{fila[c_dir]}</span><br><br>
                                 <a href='{link_gmaps}' target='_blank' 
-                                   style='background-color:#1a73e8; color:white; padding:8px 15px; 
-                                          text-decoration:none; border-radius:20px; display:block; text-align:center; font-weight:bold;'>
-                                   🚀 NAVEGAR
+                                   style='background-color:#1a73e8; color:white; padding:10px 15px; 
+                                          text-decoration:none; border-radius:8px; display:block; text-align:center; font-weight:bold;'>
+                                   🚀 ABRIR EN MAPS
                                 </a>
                             </div>
                             """
@@ -157,6 +158,4 @@ if st.session_state.mensaje_resultado:
         st.success(st.session_state.mensaje_resultado)
 
 if st.session_state.mapa_actual is not None:
-    # CAMBIO CLAVE: Usamos folium_static en vez de st_folium
-    # Esto renderiza el mapa una sola vez y evita el bucle de parpadeo
     folium_static(st.session_state.mapa_actual, width=700, height=500)
