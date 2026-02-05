@@ -1,11 +1,11 @@
 import streamlit as st
 import pandas as pd
 import folium
-from streamlit_folium import st_folium
+# CAMBIO CLAVE: Importamos folium_static para evitar el parpadeo
+from streamlit_folium import folium_static
 import polyline
 import requests
 import urllib.parse
-# CAMBIO IMPORTANTE: Usamos ArcGIS en lugar de Nominatim
 from geopy.geocoders import ArcGIS 
 from geopy.distance import geodesic
 
@@ -15,7 +15,7 @@ st.set_page_config(page_title="Ruta Nexa", page_icon="⛽", layout="centered")
 st.title("⛽ Localizador Nexa")
 st.markdown("Calcula tu ruta y encuentra la gasolinera sostenible más conveniente.")
 
-# --- INICIALIZAR MEMORIA (SESSION STATE) ---
+# --- INICIALIZAR MEMORIA ---
 if 'mapa_actual' not in st.session_state:
     st.session_state.mapa_actual = None
 if 'mensaje_resultado' not in st.session_state:
@@ -27,17 +27,15 @@ if 'tipo_mensaje' not in st.session_state:
 @st.cache_data
 def cargar_datos():
     try:
-        # Intenta cargar el Excel
         df = pd.read_excel("Estaciones_Nexa_Listas.xlsx")
         return df
-    except Exception as e:
+    except Exception:
         return None
 
 df = cargar_datos()
 
 if df is None:
-    st.error("⚠️ No encuentro el archivo 'Estaciones_Nexa_Listas.xlsx' en el repositorio.")
-    st.warning("👉 Asegúrate de haber subido el archivo Excel a GitHub junto con app.py")
+    st.error("⚠️ No encuentro el archivo 'Estaciones_Nexa_Listas.xlsx'.")
     st.stop()
 
 # --- BARRA LATERAL ---
@@ -51,11 +49,11 @@ with st.sidebar:
 # --- LÓGICA PRINCIPAL ---
 if boton_buscar:
     with st.spinner('Conectando con satélites y calculando ruta...'):
-        # CAMBIO IMPORTANTE: Usamos ArcGIS (más robusto para Streamlit Cloud)
+        # Usamos ArcGIS por estabilidad
         geolocator = ArcGIS(timeout=10)
         
         try:
-            # 1. Geolocalizar (Convertir texto a coordenadas)
+            # 1. Geolocalizar
             loc_org = geolocator.geocode(origen + ", España")
             loc_des = geolocator.geocode(destino + ", España")
             
@@ -65,17 +63,18 @@ if boton_buscar:
                 st.session_state.mapa_actual = None
             
             else:
-                # 2. Obtener Ruta OSRM (Servicio de trazado de carreteras)
-                # Nota: Si OSRM falla también, avísame y cambiamos a otro servicio.
+                # 2. Ruta OSRM
                 url = f"http://router.project-osrm.org/route/v1/driving/{loc_org.longitude},{loc_org.latitude};{loc_des.longitude},{loc_des.latitude}?overview=full"
-                
-                # Añadimos un user-agent también a la petición de rutas por si acaso
                 headers = {'User-Agent': 'NexaLocatorApp/1.0'}
-                r = requests.get(url, headers=headers).json()
+                
+                try:
+                    r = requests.get(url, headers=headers).json()
+                except:
+                     r = {} # Manejo de error si OSRM falla
                 
                 if 'routes' not in r:
                     st.session_state.tipo_mensaje = "error"
-                    st.session_state.mensaje_resultado = "❌ No hay ruta por carretera posible entre estos puntos."
+                    st.session_state.mensaje_resultado = "❌ No hay ruta por carretera posible."
                     st.session_state.mapa_actual = None
                 else:
                     trayecto = polyline.decode(r['routes'][0]['geometry'])
@@ -90,7 +89,6 @@ if boton_buscar:
 
                     # 4. Buscar Gasolineras
                     c_lat, c_lon = 'LATITUD', 'LONGITUD'
-                    # Detectamos columnas de texto dinámicamente
                     cols_txt = df.select_dtypes(include=['object']).columns
                     c_nom = cols_txt[0] 
                     c_dir = cols_txt[1]
@@ -101,7 +99,6 @@ if boton_buscar:
                     for _, fila in df.iterrows():
                         pos_gas = (fila[c_lat], fila[c_lon])
                         
-                        # Filtro de distancia
                         cerca = False
                         for p in puntos_ruta:
                             if geodesic(pos_gas, p).km < distancia_max:
@@ -111,14 +108,12 @@ if boton_buscar:
                         if cerca:
                             count += 1
                             
-                            # Link para App Google Maps
                             params = {
                                 'origin': origen,
                                 'destination': destino,
                                 'waypoints': f"{fila[c_lat]},{fila[c_lon]}",
                                 'travelmode': 'driving'
                             }
-                            # Usamos el enlace universal v2
                             link_gmaps = f"https://www.google.com/maps/dir/?api=1?{urllib.parse.urlencode(params)}"
 
                             html_popup = f"""
@@ -139,7 +134,6 @@ if boton_buscar:
                                 icon=folium.Icon(color='green', icon='leaf', prefix='fa')
                             ).add_to(m)
 
-                    # 5. Guardar estado
                     st.session_state.mapa_actual = m
                     
                     if count > 0:
@@ -147,11 +141,11 @@ if boton_buscar:
                         st.session_state.mensaje_resultado = f"✅ Ruta calculada: {count} estaciones encontradas."
                     else:
                         st.session_state.tipo_mensaje = "warning"
-                        st.session_state.mensaje_resultado = f"⚠️ No hay gasolineras a menos de {distancia_max} km de la ruta."
+                        st.session_state.mensaje_resultado = f"⚠️ No hay gasolineras a menos de {distancia_max} km."
 
         except Exception as e:
             st.session_state.tipo_mensaje = "error"
-            st.session_state.mensaje_resultado = f"Ocurrió un error: {str(e)}"
+            st.session_state.mensaje_resultado = f"Error: {str(e)}"
 
 # --- VISUALIZACIÓN FINAL ---
 if st.session_state.mensaje_resultado:
@@ -163,4 +157,6 @@ if st.session_state.mensaje_resultado:
         st.success(st.session_state.mensaje_resultado)
 
 if st.session_state.mapa_actual is not None:
-    st_folium(st.session_state.mapa_actual, width=700, height=500)
+    # CAMBIO CLAVE: Usamos folium_static en vez de st_folium
+    # Esto renderiza el mapa una sola vez y evita el bucle de parpadeo
+    folium_static(st.session_state.mapa_actual, width=700, height=500)
