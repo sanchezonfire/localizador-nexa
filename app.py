@@ -8,178 +8,121 @@ import urllib.parse
 from geopy.geocoders import ArcGIS 
 from geopy.distance import geodesic
 
-# --- CONFIGURACIÓN DE LA PÁGINA ---
-st.set_page_config(page_title="Ruta Nexa", page_icon="⛽", layout="centered")
+# --- CONFIGURACIÓN ---
+st.set_page_config(page_title="Ruta Nexa", page_icon="⛽", layout="wide")
 
 st.title("⛽ Localizador Nexa")
-st.markdown("Calcula tu ruta y encuentra la gasolinera sostenible más conveniente.")
-
-# --- MEMORIA (SESSION STATE) ---
-if 'mapa_actual' not in st.session_state:
-    st.session_state.mapa_actual = None
-if 'mensaje_resultado' not in st.session_state:
-    st.session_state.mensaje_resultado = None
-if 'tipo_mensaje' not in st.session_state:
-    st.session_state.tipo_mensaje = None
 
 # --- CARGA DE DATOS ---
 @st.cache_data
 def cargar_datos():
+    # CAMBIA ESTO POR EL NOMBRE DE TU NUEVO ARCHIVO
+    archivo = "Estaciones_Nexa_CORREGIDAS.xlsx" 
     try:
-        df = pd.read_excel("Estaciones_Nexa_Listas.xlsx")
-        
-        # --- CORRECCIÓN CRÍTICA DE COORDENADAS ---
-        # 1. Buscamos columnas de latitud/longitud
-        c_lat = next((c for c in df.columns if 'LAT' in c.upper()), 'LATITUD')
-        c_lon = next((c for c in df.columns if 'LON' in c.upper()), 'LONGITUD')
-        
-        # 2. Forzamos a que sean números puros (eliminamos errores)
-        df[c_lat] = pd.to_numeric(df[c_lat], errors='coerce')
-        df[c_lon] = pd.to_numeric(df[c_lon], errors='coerce')
-        
-        # 3. Eliminamos filas vacías
-        df = df.dropna(subset=[c_lat, c_lon])
-        
-        return df, c_lat, c_lon
-    except Exception as e:
-        return None, None, None
+        df = pd.read_excel(archivo)
+        # Limpieza robusta de coordenadas
+        df['LATITUD'] = pd.to_numeric(df['LATITUD'], errors='coerce')
+        df['LONGITUD'] = pd.to_numeric(df['LONGITUD'], errors='coerce')
+        df = df.dropna(subset=['LATITUD', 'LONGITUD'])
+        return df
+    except FileNotFoundError:
+        st.error(f"⚠️ No encuentro el archivo '{archivo}'. Súbelo al repositorio.")
+        return None
 
-df, c_lat, c_lon = cargar_datos()
-
-if df is None:
-    st.error("⚠️ Error cargando 'Estaciones_Nexa_Listas.xlsx'. Revisa que el archivo esté en GitHub.")
-    st.stop()
+df = cargar_datos()
 
 # --- BARRA LATERAL ---
 with st.sidebar:
-    st.header("📍 Configura tu viaje")
+    st.header("📍 Tu Viaje")
     origen = st.text_input("Origen", "Madrid")
     destino = st.text_input("Destino", "Valencia")
-    distancia_max = st.slider("Desvío máx. (km)", 1, 20, 5)
-    boton_buscar = st.button("🔍 Buscar Ruta")
+    distancia_max = st.slider("Desvío máx. (km)", 1, 50, 10, help="Distancia máxima desde la carretera a la gasolinera")
+    buscar = st.button("🔍 Buscar Ruta", type="primary")
 
-# --- LÓGICA PRINCIPAL ---
-if boton_buscar:
-    with st.spinner('Calculando ruta...'):
+# --- LÓGICA ---
+if buscar and df is not None:
+    with st.spinner('Calculando ruta óptima...'):
         geolocator = ArcGIS(timeout=10)
         
+        # 1. Geolocalizar puntos
         try:
-            # 1. Geolocalizar
             loc_org = geolocator.geocode(origen + ", España")
             loc_des = geolocator.geocode(destino + ", España")
             
             if not loc_org or not loc_des:
-                st.session_state.tipo_mensaje = "error"
-                st.session_state.mensaje_resultado = "❌ No encuentro esa ciudad."
-                st.session_state.mapa_actual = None
+                st.error("❌ No encuentro una de las ciudades. Intenta ser más específico.")
+                st.stop()
+
+            # 2. Obtener Ruta (OSRM)
+            url = f"http://router.project-osrm.org/route/v1/driving/{loc_org.longitude},{loc_org.latitude};{loc_des.longitude},{loc_des.latitude}?overview=full"
+            r = requests.get(url, headers={'User-Agent': 'NexaApp/1.0'}).json()
             
-            else:
-                # 2. Ruta OSRM
-                url = f"http://router.project-osrm.org/route/v1/driving/{loc_org.longitude},{loc_org.latitude};{loc_des.longitude},{loc_des.latitude}?overview=full"
-                headers = {'User-Agent': 'NexaLocatorApp/1.0'}
+            if 'routes' not in r:
+                st.error("❌ No se encontró ruta por carretera.")
+                st.stop()
+
+            trayecto = polyline.decode(r['routes'][0]['geometry'])
+            
+            # 3. Filtrar Gasolineras
+            # Optimizacion: Creamos una lista de puntos de la ruta para comparar
+            # Reducimos la resolución de la ruta para que el cálculo sea rápido (1 de cada 20 puntos)
+            puntos_ruta_simplificados = trayecto[::20] 
+            
+            gasolineras_validas = []
+            
+            for _, fila in df.iterrows():
+                coords_gas = (fila['LATITUD'], fila['LONGITUD'])
                 
-                try:
-                    r = requests.get(url, headers=headers).json()
-                except:
-                     r = {} 
+                # Comprobar si está cerca de ALGÚN punto de la ruta
+                # Usamos una lógica rápida: primero descartamos por "caja" (lat/lon) y luego calculamos distancia real
+                es_valida = False
+                for p in puntos_ruta_simplificados:
+                    # Cálculo rápido aproximado antes de hacer el geodésico exacto
+                    if abs(coords_gas[0] - p[0]) < 0.5 and abs(coords_gas[1] - p[1]) < 0.5:
+                        if geodesic(coords_gas, p).km <= distancia_max:
+                            es_valida = True
+                            break
                 
-                if 'routes' not in r:
-                    st.session_state.tipo_mensaje = "error"
-                    st.session_state.mensaje_resultado = "❌ No hay ruta por carretera."
-                    st.session_state.mapa_actual = None
-                else:
-                    trayecto = polyline.decode(r['routes'][0]['geometry'])
-                    
-                    # 3. Crear el Mapa (Centrado automático)
-                    m = folium.Map(location=[loc_org.latitude, loc_org.longitude], zoom_start=6)
-                    
-                    # Dibujar ruta
-                    folium.PolyLine(trayecto, color="#4285F4", weight=6, opacity=0.7).add_to(m)
-                    
-                    # Marcadores Inicio/Fin
-                    folium.Marker([loc_org.latitude, loc_org.longitude], popup="Salida", icon=folium.Icon(color='blue', icon='play')).add_to(m)
-                    folium.Marker([loc_des.latitude, loc_des.longitude], popup="Destino", icon=folium.Icon(color='red', icon='flag')).add_to(m)
+                if es_valida:
+                    gasolineras_validas.append(fila)
+            
+            # 4. Pintar Mapa
+            # Centramos el mapa para ver todo el trayecto
+            m = folium.Map(location=[loc_org.latitude, loc_org.longitude], zoom_start=6)
+            folium.PolyLine(trayecto, color="#3b82f6", weight=5, opacity=0.7).add_to(m)
+            
+            # Marcadores Inicio/Fin
+            folium.Marker([loc_org.latitude, loc_org.longitude], icon=folium.Icon(color='blue', icon='play'), popup="Origen").add_to(m)
+            folium.Marker([loc_des.latitude, loc_des.longitude], icon=folium.Icon(color='red', icon='flag'), popup="Destino").add_to(m)
 
-                    # 4. Buscar Gasolineras
-                    cols_txt = df.select_dtypes(include=['object']).columns
-                    c_nom = cols_txt[0] 
-                    c_dir = cols_txt[1]
+            # Marcadores Gasolineras
+            for fila in gasolineras_validas:
+                # Link Google Maps
+                gmaps_link = f"https://www.google.com/maps/dir/?api=1&origin={urllib.parse.quote(origen)}&destination={urllib.parse.quote(destino)}&waypoints={fila['LATITUD']},{fila['LONGITUD']}&travelmode=driving"
+                
+                html = f"""
+                <div style="font-family:sans-serif; width:200px">
+                    <b>{fila.get('Nombre Estación', 'Gasolinera Nexa')}</b><br>
+                    <span style="font-size:12px">{fila.get('Dirección', '')}</span><br>
+                    <a href="{gmaps_link}" target="_blank" style="display:block; background:#16a34a; color:white; text-align:center; padding:5px; border-radius:5px; margin-top:5px; text-decoration:none;">🚀 Navegar</a>
+                </div>
+                """
+                
+                folium.Marker(
+                    [fila['LATITUD'], fila['LONGITUD']],
+                    popup=folium.Popup(html, max_width=250),
+                    icon=folium.Icon(color='green', icon='leaf', prefix='fa')
+                ).add_to(m)
 
-                    count = 0
-                    puntos_ruta = trayecto[::30] 
-                    
-                    # Lista para auto-ajustar el zoom
-                    puntos_interes = [[loc_org.latitude, loc_org.longitude], [loc_des.latitude, loc_des.longitude]]
+            # Ajustar zoom para ver todos los puntos
+            puntos_a_mostrar = [[loc_org.latitude, loc_org.longitude], [loc_des.latitude, loc_des.longitude]]
+            if gasolineras_validas:
+                puntos_a_mostrar.extend([[g['LATITUD'], g['LONGITUD']] for g in gasolineras_validas])
+            m.fit_bounds(puntos_a_mostrar)
 
-                    for _, fila in df.iterrows():
-                        # Aseguramos conversión a float puro de Python (clave para que se vean)
-                        lat_gas = float(fila[c_lat])
-                        lon_gas = float(fila[c_lon])
-                        pos_gas = (lat_gas, lon_gas)
-                        
-                        cerca = False
-                        for p in puntos_ruta:
-                            if geodesic(pos_gas, p).km < distancia_max:
-                                cerca = True
-                                break
-                        
-                        if cerca:
-                            count += 1
-                            puntos_interes.append([lat_gas, lon_gas])
-                            
-                            # Enlace Google Maps
-                            params = {
-                                'origin': origen,
-                                'destination': destino,
-                                'waypoints': f"{lat_gas},{lon_gas}",
-                                'travelmode': 'driving'
-                            }
-                            # Enlace formato universal
-                            link_gmaps = f"https://www.google.com/maps/dir/?api=1?{urllib.parse.urlencode(params)}"
-
-                            html_popup = f"""
-                            <div style='font-family:sans-serif; width:200px;'>
-                                <b style='color:#2E7D32'>{fila[c_nom]}</b><br>
-                                <span style='font-size:12px'>{fila[c_dir]}</span><br><br>
-                                <a href='{link_gmaps}' target='_blank' 
-                                   style='background-color:#1a73e8; color:white; padding:8px 15px; 
-                                          text-decoration:none; border-radius:8px; display:block; text-align:center; font-weight:bold;'>
-                                   🚀 ABRIR EN MAPS
-                                </a>
-                            </div>
-                            """
-                            
-                            folium.Marker(
-                                location=[lat_gas, lon_gas],
-                                popup=folium.Popup(html_popup, max_width=250),
-                                icon=folium.Icon(color='green', icon='leaf', prefix='fa')
-                            ).add_to(m)
-
-                    # Auto-ajustar zoom para ver todo
-                    if puntos_interes:
-                        m.fit_bounds(puntos_interes)
-
-                    st.session_state.mapa_actual = m
-                    
-                    if count > 0:
-                        st.session_state.tipo_mensaje = "success"
-                        st.session_state.mensaje_resultado = f"✅ Ruta calculada: {count} estaciones encontradas."
-                    else:
-                        st.session_state.tipo_mensaje = "warning"
-                        st.session_state.mensaje_resultado = f"⚠️ No hay gasolineras a menos de {distancia_max} km."
+            # Mostrar resultados
+            st.success(f"✅ Encontradas {len(gasolineras_validas)} gasolineras en tu ruta.")
+            folium_static(m, width=None, height=500)
 
         except Exception as e:
-            st.session_state.tipo_mensaje = "error"
-            st.session_state.mensaje_resultado = f"Error: {str(e)}"
-
-# --- VISUALIZACIÓN FINAL ---
-if st.session_state.mensaje_resultado:
-    if st.session_state.tipo_mensaje == "error":
-        st.error(st.session_state.mensaje_resultado)
-    elif st.session_state.tipo_mensaje == "warning":
-        st.warning(st.session_state.mensaje_resultado)
-    else:
-        st.success(st.session_state.mensaje_resultado)
-
-if st.session_state.mapa_actual is not None:
-    folium_static(st.session_state.mapa_actual, width=700, height=500)
+            st.error(f"Error: {e}")
